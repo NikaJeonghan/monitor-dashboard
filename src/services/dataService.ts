@@ -42,22 +42,36 @@ class DataService {
     private historySize = 300; // 5 minutes at 1 second intervals
     private dataHistory: Map<string, SystemMetrics[]> = new Map();
     private updateInterval: number | null = null;
+    private lastUpdateTime: number = 0;
 
     constructor() {
         this.initializeData();
         this.startAutoUpdate();
     }
 
-    // 启动自动更新
+    // 启动自动更新 - 确保每1-2秒更新一次
     public startAutoUpdate() {
         if (this.updateInterval) {
             clearInterval(this.updateInterval);
         }
+
+        // 恢复时不丢失状态，立即更新一次
+        if (this.lastUpdateTime === 0) {
+            this.updateData();
+            this.lastUpdateTime = Date.now();
+        }
+
         this.updateInterval = window.setInterval(() => {
             if (systemState.value.running) {
-                this.updateData();
+                try {
+                    this.updateData();
+                    this.lastUpdateTime = Date.now();
+                } catch (error) {
+                    console.error('数据更新失败:', error);
+                    // 不中断更新，继续下次尝试
+                }
             }
-        }, 1000);
+        }, 1500); // 1.5秒更新间隔，满足1-2秒要求
     }
 
     // 停止自动更新
@@ -66,6 +80,12 @@ class DataService {
             clearInterval(this.updateInterval);
             this.updateInterval = null;
         }
+        // 保持状态，不重置lastUpdateTime
+    }
+
+    // 获取最后更新时间
+    public getLastUpdateTime(): number {
+        return this.lastUpdateTime;
     }
 
     // 刷新数据
@@ -163,7 +183,8 @@ class DataService {
             const newMetrics = this.generateMetrics();
             server.metrics = newMetrics;
 
-            // Update server status based on thresholds
+            // Update server status based on enhanced health rules
+            // 健康度规则：cpu > 85% 或 mem > 90% 或 load1m > 5 判为不健康
             if (newMetrics.cpu > 85 || newMetrics.memory > 90 || newMetrics.load1m > 5) {
                 server.status = 'error';
             } else if (newMetrics.cpu > 70 || newMetrics.memory > 80 || newMetrics.load1m > 3) {
@@ -279,45 +300,171 @@ class DataService {
         return this.alerts.sort((a, b) => b.timestamp - a.timestamp);
     }
 
+    // 增强的健康状态检查，基于阈值规则实时变化
     public getHealthStatus(): { overall: 'healthy' | 'warning' | 'error'; message: string } {
-        const errorServers = this.servers.filter(s => s.status === 'error').length;
-        const warningServers = this.servers.filter(s => s.status === 'warning').length;
+        const totalServers = this.servers.length;
 
-        if (errorServers > 0) {
+        // 健康度规则示例：cpu > 85% 或 mem > 90% 或 load1m > 5 判为不健康
+        const criticalServers = this.servers.filter(server =>
+            server.metrics.cpu > 85 ||
+            server.metrics.memory > 90 ||
+            server.metrics.load1m > 5
+        );
+
+        const warningServers = this.servers.filter(server =>
+            server.metrics.cpu > 70 ||
+            server.metrics.memory > 80 ||
+            server.metrics.load1m > 3
+        );
+
+        if (criticalServers.length > 0) {
+            const criticalDetails = criticalServers.map(s =>
+                `${s.name}(CPU:${s.metrics.cpu.toFixed(1)}%, MEM:${s.metrics.memory.toFixed(1)}%, LOAD:${s.metrics.load1m.toFixed(2)})`
+            ).join(', ');
             return {
                 overall: 'error',
-                message: `${errorServers} server(s) in critical state`
+                message: `${criticalServers.length} server(s) critical: ${criticalDetails}`
             };
-        } else if (warningServers > 0) {
+        } else if (warningServers.length > 0) {
             return {
                 overall: 'warning',
-                message: `${warningServers} server(s) need attention`
+                message: `${warningServers.length} server(s) need attention (cpu > 70% or mem > 80% or load1m > 3)`
             };
         } else {
             return {
                 overall: 'healthy',
-                message: 'All systems operational'
+                message: `All ${totalServers} systems operational`
             };
         }
     }
 
+    // 增强的负载均衡状态检查，基于网络流量分布
     public getLoadBalanceStatus(): { status: 'balanced' | 'skewed'; message: string } {
+        // 统计各服务器 netIn/netOut 分布，若最大值/最小值比值 > 3 视为"倾斜"
         const networkValues = this.servers.map(s => s.metrics.networkIn + s.metrics.networkOut);
         const max = Math.max(...networkValues);
         const min = Math.min(...networkValues);
 
-        if (min === 0) {
+        if (min === 0 || this.servers.length === 0) {
             return { status: 'balanced', message: 'Load distribution normal' };
         }
 
         const ratio = max / min;
+
         if (ratio > 3) {
+            // 找出流量最大和最小的服务器
+            const maxServer = this.servers.find(s => (s.metrics.networkIn + s.metrics.networkOut) === max);
+            const minServer = this.servers.find(s => (s.metrics.networkIn + s.metrics.networkOut) === min);
+
             return {
                 status: 'skewed',
-                message: `Load imbalance detected (ratio: ${ratio.toFixed(2)}x)`
+                message: `Load imbalance: ${maxServer?.name}(${(max / 1024).toFixed(1)}KB/s) vs ${minServer?.name}(${(min / 1024).toFixed(1)}KB/s), ratio: ${ratio.toFixed(2)}x`
             };
         } else {
-            return { status: 'balanced', message: 'Load distribution balanced' };
+            return {
+                status: 'balanced',
+                message: `Load distribution balanced (ratio: ${ratio.toFixed(2)}x)`
+            };
+        }
+    }
+
+    // 获取更新状态信息
+    public getUpdateStatus(): { isUpdating: boolean; lastUpdate: number; updateInterval: number } {
+        return {
+            isUpdating: this.updateInterval !== null,
+            lastUpdate: this.lastUpdateTime,
+            updateInterval: 1500 // 1.5秒
+        };
+    }
+
+    // 获取历史数据时间范围
+    public getHistoryTimeRange(): { start: number; end: number; availableMinutes: number } {
+        const now = Date.now();
+        const availableMinutes = Math.min(15, Math.floor(this.historySize / 60)); // 最多15分钟
+        const start = now - (availableMinutes * 60 * 1000);
+
+        return {
+            start,
+            end: now,
+            availableMinutes
+        };
+    }
+
+    // 获取指定时间范围的历史数据
+    public getHistoricalData(timeRangeMinutes: number): {
+        servers: ServerData[];
+        aggregatedMetrics: SystemMetrics[];
+        timeRange: { start: number; end: number }
+    } {
+        const now = Date.now();
+        const end = now;
+        const start = now - (timeRangeMinutes * 60 * 1000);
+
+        // 获取历史指标数据
+        const historicalMetrics: SystemMetrics[] = [];
+        for (let i = 0; i < timeRangeMinutes * 60; i++) {
+            const timestamp = start + (i * 1000);
+            const serverStates = this.servers.map(server => {
+                const history = this.dataHistory.get(server.id);
+                const historicalPoint = history?.find(m =>
+                    Math.abs(m.timestamp - timestamp) < 1000
+                );
+
+                return {
+                    id: server.id,
+                    name: server.name,
+                    region: server.region,
+                    metrics: historicalPoint || server.metrics,
+                    status: this.getServerStatus(historicalPoint || server.metrics)
+                };
+            });
+
+            // 计算该时间点的聚合指标
+            const totalServers = serverStates.length;
+            const aggregated = serverStates.reduce((acc, server) => ({
+                cpu: acc.cpu + server.metrics.cpu,
+                memory: acc.memory + server.metrics.memory,
+                disk: acc.disk + server.metrics.disk,
+                networkIn: acc.networkIn + server.metrics.networkIn,
+                networkOut: acc.networkOut + server.metrics.networkOut,
+                load1m: acc.load1m + server.metrics.load1m,
+                timestamp
+            }), { cpu: 0, memory: 0, disk: 0, networkIn: 0, networkOut: 0, load1m: 0, timestamp });
+
+            historicalMetrics.push({
+                cpu: aggregated.cpu / totalServers,
+                memory: aggregated.memory / totalServers,
+                disk: aggregated.disk / totalServers,
+                networkIn: aggregated.networkIn / totalServers,
+                networkOut: aggregated.networkOut / totalServers,
+                load1m: aggregated.load1m / totalServers,
+                timestamp
+            });
+        }
+
+        return {
+            servers: this.servers.map(server => {
+                const history = this.dataHistory.get(server.id) || [];
+                const timeRangeHistory = history.filter(m =>
+                    m.timestamp >= start && m.timestamp <= end
+                );
+                return {
+                    ...server,
+                    metrics: timeRangeHistory[timeRangeHistory.length - 1] || server.metrics
+                };
+            }),
+            aggregatedMetrics: historicalMetrics,
+            timeRange: { start, end }
+        };
+    }
+
+    private getServerStatus(metrics: SystemMetrics): 'healthy' | 'warning' | 'error' {
+        if (metrics.cpu > 85 || metrics.memory > 90 || metrics.load1m > 5) {
+            return 'error';
+        } else if (metrics.cpu > 70 || metrics.memory > 80 || metrics.load1m > 3) {
+            return 'warning';
+        } else {
+            return 'healthy';
         }
     }
 }
