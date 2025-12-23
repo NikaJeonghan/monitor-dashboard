@@ -82,11 +82,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { dataService } from '../services/dataService'
+import { setViewMode, setTimeRange, setPlaybackIndex, getPlaybackIndex } from '../services/systemState'
 
 const emit = defineEmits<{
-  'timeRangeChange': { start: number; end: number }
-  'timePositionChange': number
-  'modeChange': 'live' | 'historical'
+  timeRangeChange: [start: number, end: number]
+  timePositionChange: [timestamp: number]
+  modeChange: [mode: 'live' | 'historical']
 }>()
 
 // 状态管理
@@ -118,6 +119,7 @@ const currentTime = computed(() => {
 // 方法
 const setMode = (newMode: 'live' | 'historical') => {
   mode.value = newMode
+  setViewMode(newMode)
   if (newMode === 'live') {
     stopPlayback()
     emit('modeChange', 'live')
@@ -133,6 +135,7 @@ const onTimeRangeChange = () => {
 }
 
 const onTimePositionChange = () => {
+  setPlaybackIndex(currentTimePosition.value)
   emit('timePositionChange', currentTime.value)
 }
 
@@ -148,6 +151,7 @@ const togglePlayback = () => {
 
 const resetPosition = () => {
   currentTimePosition.value = 0
+  setPlaybackIndex(0)
   emit('timePositionChange', currentTime.value)
   if (isPlaying.value) {
     stopPlayback()
@@ -158,11 +162,16 @@ const resetPosition = () => {
 const initializeHistoricalMode = () => {
   const timeRange = selectedTimeRange.value * 60 * 1000
   const now = Date.now()
-  const timeRangeObj = {
-    start: now - timeRange,
-    end: now
-  }
-  emit('timeRangeChange', timeRangeObj)
+  const timeRangeObj: [start: number, end: number] = [now - timeRange, now]
+  
+  // 设置时间范围到全局状态
+  setTimeRange(timeRangeObj[0], timeRangeObj[1])
+  
+  // 创建历史快照
+  dataService.createHistoricalSnapshot(selectedTimeRange.value)
+  
+  emit('timeRangeChange', timeRangeObj[0], timeRangeObj[1])
+  console.log('历史回放模式已初始化，时间范围:', selectedTimeRange.value, '分钟')
 }
 
 const startPlayback = () => {
@@ -172,10 +181,12 @@ const startPlayback = () => {
   playbackInterval.value = window.setInterval(() => {
     if (currentTimePosition.value < maxPosition.value) {
       currentTimePosition.value++
+      setPlaybackIndex(currentTimePosition.value)
       emit('timePositionChange', currentTime.value)
     } else {
       // 播放结束，循环播放
       currentTimePosition.value = 0
+      setPlaybackIndex(0)
       emit('timePositionChange', currentTime.value)
     }
   }, interval)
@@ -185,6 +196,7 @@ const stopPlayback = () => {
   if (playbackInterval.value) {
     clearInterval(playbackInterval.value)
     playbackInterval.value = null
+    console.log('历史回放已停止')
   }
 }
 
@@ -199,7 +211,7 @@ const formatTime = (timestamp: number) => {
 
 // 生命周期
 onMounted(() => {
-  initializeHistoricalMode()
+  // 初始化时不自动创建历史快照，等待用户切换到历史模式
 })
 
 onUnmounted(() => {

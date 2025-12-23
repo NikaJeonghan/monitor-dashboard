@@ -31,9 +31,46 @@
         <VisualizationArea :servers="servers" />
       </div>
 
-    <!-- Debug Info -->
-    <div v-if="isRunning" style="position: fixed; bottom: 10px; right: 10px; background: rgba(0,255,0,0.8); color: white; padding: 5px; border-radius: 3px; font-size: 12px;">
-      数据更新中...
+    <!-- Data Update Status -->
+    <div 
+      :style="{
+        position: 'fixed', 
+        bottom: '10px', 
+        right: '10px', 
+        background: isRunning ? 'rgba(0,212,255,0.9)' : 'rgba(255,68,68,0.9)', 
+        color: 'white', 
+        padding: '8px 12px', 
+        borderRadius: '6px', 
+        fontSize: '12px',
+        fontWeight: 'bold',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+        zIndex: 1000,
+        transition: 'all 0.3s ease'
+      }"
+    >
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <div 
+          :style="{
+            width: '8px', 
+            height: '8px', 
+            borderRadius: '50%', 
+            background: isRunning ? '#00ff88' : '#ff4444',
+            animation: isRunning ? 'pulse 1.5s infinite' : 'none'
+          }"
+        ></div>
+        <span>{{ isRunning ? '数据实时更新中' : '数据已暂停' }}</span>
+      </div>
+      <div style="font-size: 10px; margin-top: 2px; opacity: 0.8;">
+        最后更新: {{ new Date(lastUpdateTime).toLocaleTimeString() }}
+      </div>
+    </div>
+
+    <!-- Refresh Indicator -->
+    <div 
+      v-if="showRefreshIndicator"
+      style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,212,255,0.95); color: white; padding: 20px 30px; border-radius: 8px; font-size: 16px; font-weight: bold; z-index: 2000; animation: fadeInOut 2s ease;"
+    >
+      数据已刷新！
     </div>
     </div>
   </div>
@@ -51,9 +88,11 @@ import { systemState, setRunning } from './services/systemState'
 // State management
 const searchFilter = ref('')
 const selectedTask = ref<Task | null>(null)
+const showRefreshIndicator = ref(false)
+const lastUpdateTime = ref(dataService.getLastUpdateTime())
 
-// Data from service
-const servers = computed(() => dataService.getServers())
+// Data from service - 使用新的响应式数据源
+const servers = computed(() => dataService.getFilteredServers())
 const tasks = computed(() => dataService.getTasks(searchFilter.value))
 const alerts = computed(() => dataService.getAlerts())
 const aggregatedMetrics = computed(() => dataService.getAggregatedMetrics())
@@ -76,6 +115,14 @@ const toggleDataStream = () => {
 
 const refreshData = () => {
   dataService.refreshData()
+  lastUpdateTime.value = dataService.getLastUpdateTime()
+  
+  // 显示刷新指示器
+  showRefreshIndicator.value = true
+  setTimeout(() => {
+    showRefreshIndicator.value = false
+  }, 2000)
+  
   console.log('数据已刷新')
 }
 
@@ -129,17 +176,31 @@ const stopDataUpdates = () => {
   dataService.stopAutoUpdate()
 }
 
+// 定时更新最后更新时间
+let updateTimeInterval: number
+
 // Lifecycle
 onMounted(() => {
   // Initialize data
   dataService.updateData()
+  lastUpdateTime.value = dataService.getLastUpdateTime()
   
   // Start real-time updates
   startDataUpdates()
+  
+  // 定时更新最后更新时间显示
+  updateTimeInterval = window.setInterval(() => {
+    if (systemState.value.running) {
+      lastUpdateTime.value = dataService.getLastUpdateTime()
+    }
+  }, 1000)
 })
 
 onUnmounted(() => {
   stopDataUpdates()
+  if (updateTimeInterval) {
+    clearInterval(updateTimeInterval)
+  }
 })
 </script>
 
@@ -204,5 +265,40 @@ button:hover, select:hover {
 button:focus, select:focus, input:focus {
   outline: 2px solid var(--accent-blue);
   outline-offset: 2px;
+}
+
+/* 动画效果 */
+@keyframes pulse {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.2);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes fadeInOut {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  20% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.05);
+  }
+  80% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.9);
+  }
 }
 </style>

@@ -4,38 +4,24 @@
     
     <!-- Time Control Component -->
     <TimeControl 
-      @timeRangeChange="onTimeRangeChange"
-      @timePositionChange="onTimePositionChange"
-      @modeChange="onModeChange"
+      @timeRangeChange="(timeRange: any) => onTimeRangeChange(timeRange)"
+      @timePositionChange="(timestamp: any) => onTimePositionChange(timestamp)"
+      @modeChange="(newMode: any) => onModeChange(newMode)"
     />
     
     <!-- Visualization Controls -->
     <div class="viz-controls">
-      <select v-model="selectedDimension" class="btn" @change="onDimensionChange">
-        <option value="server">按服务器</option>
-        <option value="region">按区域</option>
-        <option value="service">按服务类型</option>
-      </select>
-      
-      <select v-model="selectedServer" class="btn" v-if="selectedDimension === 'server'">
+      <select v-model="selectedServerId" class="btn" @change="onServerChange">
+        <option value="">全部服务器</option>
         <option v-for="server in servers" :key="server.id" :value="server.id">
           {{ server.name }}
         </option>
       </select>
-      
-      <select v-model="selectedRegion" class="btn" v-if="selectedDimension === 'region'">
-        <option value="us-east-1">US East</option>
-        <option value="us-west-2">US West</option>
-        <option value="eu-west-1">Europe</option>
-        <option value="ap-southeast-1">Asia Pacific</option>
-      </select>
-      
-      <select v-model="selectedService" class="btn" v-if="selectedDimension === 'service'">
-        <option value="web">Web 服务</option>
-        <option value="database">数据库</option>
-        <option value="cache">缓存</option>
-        <option value="api">API 网关</option>
-      </select>
+      <!-- 当前选中服务器信息 -->
+      <div v-if="selectedServerId" class="server-info">
+        <span class="server-label">当前选中: {{ getSelectedServerName() }}</span>
+        <button class="clear-btn" @click="clearServerSelection">清除选择</button>
+      </div>
     </div>
     
     <!-- Time Control -->
@@ -111,7 +97,7 @@ import {
 import VChart from 'vue-echarts'
 import type { ServerData, SystemMetrics } from '../services/dataService'
 import { dataService } from '../services/dataService'
-import { getSelectedMetric } from '../services/systemState'
+import { systemState, getSelectedMetric, getViewMode, getSelectedServerId, setSelectedServerId, setViewMode, getPlaybackIndex } from '../services/systemState'
 import TimeControl from './TimeControl.vue'
 
 // Register ECharts components
@@ -132,22 +118,27 @@ const props = defineProps<{
   servers: ServerData[]
 }>()
 
-const selectedDimension = ref('server')
-const selectedServer = ref('')
-const selectedRegion = ref('us-east-1')
-const selectedService = ref('web')
+const selectedServerId = ref('')
 const showTimeRange = ref(false)
 const timeRange = ref(5)
 const currentTimePosition = ref(0)
 const mode = ref<'live' | 'historical'>('live')
 const historicalData = ref<{ servers: ServerData[]; aggregatedMetrics: SystemMetrics[] }>({ servers: [], aggregatedMetrics: [] })
 
-// Set initial server
-if (props.servers.length > 0) {
-  selectedServer.value = props.servers[0]?.id || ''
+// 使用新的computed视图层
+const activeServers = computed(() => dataService.getFilteredServers())
+
+// 获取当前选中服务器的名称
+const getSelectedServerName = () => {
+  const selectedId = selectedServerId.value
+  if (!selectedId) return '未选择'
+  
+  const allServers = [...props.servers, ...activeServers.value]
+  const selectedServer = allServers.find(s => s.id === selectedId)
+  return selectedServer?.name || '未知服务器'
 }
 
-// Line chart option - 修复暗色主题下坐标轴可见性
+// Line chart option - 修复暗色主题下坐标轴可见性，优化数据密集度
 const lineChartOption = computed(() => {
   const data = generateTimeSeriesData()
   const selectedMetric = getSelectedMetric()
@@ -184,6 +175,30 @@ const lineChartOption = computed(() => {
   
   const metricConfig = getMetricData()
   
+  // 优化数据密集度 - 根据数据量调整采样间隔
+  const sampledData = data.length > 100 ? data.filter((_, index) => index % 2 === 0) : data
+  
+  // 生成时间标签 - 根据模式使用不同的时间格式
+  const sampledLabels = sampledData.map((item, index) => {
+    const date = new Date(item.timestamp)
+    if (getViewMode() === 'historical') {
+      return date.toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      })
+    } else {
+      // 实时模式显示相对时间
+      const now = Date.now()
+      const diff = Math.floor((now - item.timestamp) / 1000)
+      if (diff < 60) {
+        return `${diff}s前`
+      } else {
+        return `${Math.floor(diff / 60)}m前`
+      }
+    }
+  })
+  
   return {
     backgroundColor: 'transparent',
     textStyle: { color: 'var(--text-primary)' },
@@ -211,7 +226,7 @@ const lineChartOption = computed(() => {
     xAxis: {
       type: 'category',
       boundaryGap: false,
-      data: data.map((_, index) => `${index}s`),
+      data: sampledLabels,
       axisLine: { lineStyle: { color: '#9aa5b1', width: 2 } },  // 更亮的轴线颜色
       axisLabel: { color: '#9aa5b1', fontSize: 12 },  // 更亮的标签颜色
       axisTick: { lineStyle: { color: '#9aa5b1' } }  // 更亮的刻度颜色
@@ -229,7 +244,18 @@ const lineChartOption = computed(() => {
         name: metricConfig.name,
         type: 'line',
         smooth: true,
-        data: metricConfig.data,
+        data: sampledData.map(item => {
+          switch (selectedMetric) {
+            case 'cpu':
+              return item.cpu
+            case 'memory':
+              return item.memory
+            case 'disk':
+              return item.disk
+            default:
+              return item.cpu
+          }
+        }),
         itemStyle: { color: metricConfig.color },
         areaStyle: { 
           opacity: 0.4, 
@@ -251,9 +277,10 @@ const lineChartOption = computed(() => {
   }
 })
 
-// Gauge chart option - 修复指针挡住数字的问题
+// Gauge chart option - 使用响应式数据源
 const gaugeChartOption = computed(() => {
-  const currentServer = props.servers.find(s => s.id === selectedServer.value)
+  const filteredServers = dataService.getFilteredServers()
+  const currentServer = filteredServers.find(s => s.id === selectedServerId.value) || filteredServers[0]
   
   // 确保数据是合理的整数，避免小数点混乱
   const cpu = currentServer ? Math.round(currentServer.metrics.cpu) : 0
@@ -387,7 +414,7 @@ const gaugeChartOption = computed(() => {
           color: '#e6eef9',
           fontSize: 12,
           fontWeight: 'bold',
-          formatter: '{value}%'
+          formatter: '{value}%'  // 简化标签显示
         },
         detail: {
           valueAnimation: true,
@@ -416,11 +443,12 @@ const gaugeChartOption = computed(() => {
   }
 })
 
-// Bar chart option - 修复暗色主题下坐标轴可见性
+// Bar chart option - 使用响应式数据源
 const barChartOption = computed(() => {
-  const serverNames = props.servers.map(s => s.name)
-  const cpuData = props.servers.map(s => Math.round(s.metrics.cpu))  // 四舍五入避免小数
-  const memoryData = props.servers.map(s => Math.round(s.metrics.memory))  // 四舍五入避免小数
+  const filteredServers = dataService.getFilteredServers()
+  const serverNames = filteredServers.map(s => s.name)
+  const cpuData = filteredServers.map(s => Math.round(s.metrics.cpu))  // 四舍五入避免小数
+  const memoryData = filteredServers.map(s => Math.round(s.metrics.memory))  // 四舍五入避免小数
   
   return {
     backgroundColor: 'transparent',
@@ -498,11 +526,12 @@ const barChartOption = computed(() => {
   }
 })
 
-// Pie chart option - 优化tooltip显示
+// Pie chart option - 使用响应式数据源
 const pieChartOption = computed(() => {
   const regions = ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-southeast-1']
+  const filteredServers = dataService.getFilteredServers()
   const regionData = regions.map(region => {
-    const servers = props.servers.filter(s => s.region === region)
+    const servers = filteredServers.filter(s => s.region === region)
     const totalNetwork = servers.reduce((sum, s) => s.metrics.networkIn + s.metrics.networkOut, 0)
     return {
       name: region,
@@ -589,18 +618,18 @@ const pieChartOption = computed(() => {
 })
 
 // Event handlers for TimeControl integration
-const onTimeRangeChange = (timeRange: { start: number; end: number }) => {
+const onTimeRangeChange = (timeRange: any) => {
   // Use historical data when time range is provided
   if (mode.value === 'historical') {
     updateHistoricalData()
   }
 }
 
-const onTimePositionChange = (timestamp: number) => {
+const onTimePositionChange = (timestamp: any) => {
   currentTimePosition.value = Math.floor(timestamp / 1000)
 }
 
-const onModeChange = (newMode: 'live' | 'historical') => {
+const onModeChange = (newMode: any) => {
   mode.value = newMode
   if (newMode === 'historical') {
     updateHistoricalData()
@@ -618,35 +647,37 @@ const updateHistoricalData = () => {
   }
 }
 
-// Generate time series data
+// Generate time series data - 使用响应式数据源
 const generateTimeSeriesData = (): SystemMetrics[] => {
-  // Use historical data if in historical mode, otherwise generate mock data
-  if (mode.value === 'historical' && historicalData.value.aggregatedMetrics.length > 0) {
-    return historicalData.value.aggregatedMetrics
-  }
+  console.log('生成时序数据 - 模式:', getViewMode(), '服务器:', getSelectedServerId(), '播放索引:', getPlaybackIndex())
   
-  const data: SystemMetrics[] = []
-  const points = 60 // 60 data points
-  
-  for (let i = 0; i < points; i++) {
-    data.push({
-      cpu: Math.random() * 100,
-      memory: Math.random() * 100,
-      disk: Math.random() * 100,
-      networkIn: Math.random() * 1000,
-      networkOut: Math.random() * 1000,
-      load1m: Math.random() * 10,
-      timestamp: Date.now() - (points - i) * 1000
-    })
-  }
-  
-  return data
+  // 使用dataService的响应式数据源
+  return dataService.getFilteredTimeSeriesData()
 }
 
-const onDimensionChange = () => {
-  // Handle dimension change
-  console.log('Dimension changed to:', selectedDimension.value)
+const onServerChange = () => {
+  // Handle server selection change
+  console.log('服务器选择已更新:', selectedServerId.value)
+  setSelectedServerId(selectedServerId.value)
 }
+
+// 清除服务器选择
+const clearServerSelection = () => {
+  selectedServerId.value = ''
+  setSelectedServerId('')
+  console.log('已清除服务器选择')
+}
+
+// 监听服务器选择变化
+watch(selectedServerId, (newServerId) => {
+  console.log('服务器选择已更新:', newServerId)
+})
+
+// 监听TimeControl模式变化
+watch(mode, (newMode) => {
+  setViewMode(newMode)
+  console.log('模式已切换:', newMode)
+})
 
 const toggleTimeRange = () => {
   showTimeRange.value = !showTimeRange.value
@@ -675,6 +706,7 @@ const toggleTimeRange = () => {
   gap: 12px;
   margin-bottom: 20px;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .viz-controls .btn {
@@ -696,6 +728,39 @@ const toggleTimeRange = () => {
 .viz-controls .btn:focus {
   outline: 2px solid var(--accent-blue);
   outline-offset: 2px;
+}
+
+.server-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  padding: 8px 12px;
+  background-color: var(--primary-bg);
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+}
+
+.server-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-blue);
+}
+
+.clear-btn {
+  padding: 6px 12px;
+  background-color: var(--error-red);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.clear-btn:hover {
+  background-color: var(--warning-yellow);
+  transform: translateY(-1px);
 }
 
 .time-control {
@@ -779,6 +844,12 @@ const toggleTimeRange = () => {
   .viz-controls {
     flex-direction: column;
     gap: 8px;
+    align-items: stretch;
+  }
+  
+  .server-info {
+    margin-left: 0;
+    margin-top: 8px;
   }
   
   .visualization-area {
